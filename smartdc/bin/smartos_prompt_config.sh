@@ -6,6 +6,9 @@
 
 PATH=/usr/sbin:/usr/bin
 export PATH
+. /lib/sdc/config.sh
+load_sdc_sysinfo
+load_sdc_config
 
 # Defaults
 datacenter_headnode_id=0
@@ -281,12 +284,13 @@ promptpool()
     if [[ $bad != "" ]]; then
       printf "The disks %s are not valid choices" $bad
     else
-      DISK_LIST=$val
+      DISK_LIST="$val"
       break
     fi
   done
   
 }
+
 create_dump()
 {
     # Get avail zpool size - this assumes we're not using any space yet.
@@ -301,7 +305,7 @@ create_dump()
     # Create the dump zvol
     zfs create -V ${base_size}mb ${SYS_ZPOOL}/dump || \
       fatal "failed to create the dump zvol"
-    dumpadm -a /dev/zvol/dsk/${SYS_ZPOOL}/dump
+    dumpadm -d /dev/zvol/dsk/${SYS_ZPOOL}/dump
 }
 
 #
@@ -363,40 +367,28 @@ setup_datasets()
     fi
 
     zfs set mountpoint=legacy ${VARDS}
+
+    if ! echo $datasets | grep ${SWAPVOL} > /dev/null; then
+          printf "%-56s" "Creating swap zvol... " 
+          #
+          # We cannot allow the swap size to be less than the size of DRAM, lest$
+          # we run into the availrmem double accounting issue for locked$
+          # anonymous memory that is backed by in-memory swap (which will$
+          # severely and artificially limit VM tenancy).  We will therfore not$
+          # create a swap device smaller than DRAM -- but we still allow for the$
+          # configuration variable to account for actual consumed space by using$
+          # it to set the refreservation on the swap volume if/when the$
+          # specified size is smaller than DRAM.$
+          #
+          size=${SYSINFO_MiB_of_Memory}
+          zfs create -V ${size}mb ${SWAPVOL}
+          swap -a /dev/zvol/dsk/${SWAPVOL}
+    fi
     printf "%4s\n" "done" 
   fi
 }
 
-create_swap()
-{
-    swapsize=$1
 
-    if ! zfs list -H -o name ${SWAPVOL}; then
-        printf "%-56s" "Creating swap zvol... " 
-
-        #
-        # We cannot allow the swap size to be less than the size of DRAM, lest
-        # we run into the availrmem double accounting issue for locked
-        # anonymous memory that is backed by in-memory swap (which will
-        # severely and artificially limit VM tenancy).  We will therfore not
-        # create a swap device smaller than DRAM -- but we still allow for the
-        # configuration variable to account for actual consumed space by using
-        # it to set the refreservation on the swap volume if/when the
-        # specified size is smaller than DRAM.
-        #
-        minsize=$(swap_in_GiB 1x)
-
-        if [[ $minsize -gt $swapsize ]]; then
-            zfs create -V ${minsize}g ${SWAPVOL}
-            zfs set refreservation=${swapsize}g ${SWAPVOL}
-        else
-            zfs create -V ${swapsize}g ${SWAPVOL}
-        fi
-
-        swap -a /dev/zvol/dsk/${SWAPVOL}
-        printf "%4s\n" "done" 
-    fi
-}
 create_zpool()
 {
     disks=$1
@@ -454,7 +446,7 @@ create_zpools()
   devs=$1
 
   export SYS_ZPOOL="zones"
-  create_zpool $devs
+  create_zpool "$devs"
   sleep 5
 
   svccfg -s svc:/system/smartdc/init setprop config/zpool="zones"
@@ -629,8 +621,6 @@ echo >>$tmp_config
 platform=$(smbios -t1 | nawk '{if ($1 == "Product:") print $2}')
 [ "$platform" == "VMware" ] && echo "coal=true" >>$tmp_config
 
-echo "swap=0.25x" >>$tmp_config
-echo >>$tmp_config
 
 echo "# admin_nic is the nic admin_ip will be connected to for headnode zones."\
     >>$tmp_config
@@ -667,7 +657,7 @@ echo "*********************************************"
 echo "* This will erase *ALL DATA* on these disks *"
 echo "*********************************************"
 promptval "are you sure?" "n"
-[ "$val" == "y" ] && (create_zpools $DISK_LIST)
+[ "$val" == "y" ] && (create_zpools "$DISK_LIST")
 
 clear
 echo "The system will now finish configuration and reboot. Please wait..."
